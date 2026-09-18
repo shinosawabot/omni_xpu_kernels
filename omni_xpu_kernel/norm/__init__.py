@@ -1,0 +1,363 @@
+"""
+Normalization Kernels
+
+High-performance RMSNorm and LayerNorm using Intel ESIMD.
+
+Example:
+    import torch
+    from omni_xpu_kernel import norm
+
+    # RMSNorm
+    output = norm.rms_norm(weight, input, eps=1e-6)
+
+    # LayerNorm
+    output = norm.layer_norm(input, weight, bias, eps=1e-5)
+"""
+
+import torch
+
+from .. import _compile_meta as _meta
+from typing import Optional, Sequence, List
+
+from .._compile_ops import compile_op, fake_rms_norm, fake_layer_norm
+
+
+def _get_native():
+    """Get the native norm module."""
+    from .. import _load_extension
+
+    return _load_extension().norm
+
+
+def supports_h120_fp16() -> bool:
+    """Return whether the loaded native binary contains the H120 FP16 route."""
+    return bool(getattr(_get_native(), "__h120_fp16__", False))
+
+
+def supports_group_norm_bmg() -> bool:
+    """Return whether the loaded native binary contains the BMG GroupNorm route."""
+    return bool(getattr(_get_native(), "__group_norm_bmg__", False))
+
+
+def supports_group_norm_seedvr_bmg() -> bool:
+    """Return whether the native binary contains the SeedVR BMG route."""
+    return bool(
+        getattr(_get_native(), "__group_norm_seedvr_bmg__", False)
+    )
+
+
+def supports_rms_norm_segmented_modulation() -> bool:
+    """Return whether the native binary contains segmented RMS modulation."""
+    return bool(
+        getattr(
+            _get_native(),
+            "__rms_norm_segmented_modulation__",
+            False,
+        )
+    )
+
+
+def rms_norm_segmented_modulation_supported(input: torch.Tensor) -> bool:
+    """Return whether native policy selects the route for ``input``."""
+    if not supports_rms_norm_segmented_modulation():
+        return False
+    try:
+        return bool(
+            _get_native().rms_norm_segmented_modulation_supported(input)
+        )
+    except (RuntimeError, TypeError):
+        return False
+
+
+@compile_op("group_norm_bmg", _meta.group_norm)
+def group_norm_bmg(
+    input: torch.Tensor,
+    num_groups: int,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Run the validated BMG Boogu Image Turbo GroupNorm contracts.
+
+    The native entry point accepts contiguous BF16 XPU tensors for the six
+    captured ``[1,C,H,W]`` shapes, 32 groups, affine BF16 parameters, and
+    ``eps=1e-6``. Callers must retain their normal fallback for other inputs.
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.group_norm_bmg(input, num_groups, weight, bias, eps)
+    return _get_native().group_norm_bmg(
+        input, num_groups, weight, bias, eps
+    )
+
+
+@compile_op("group_norm_seedvr_bmg", _meta.group_norm)
+def group_norm_seedvr_bmg(
+    input: torch.Tensor,
+    num_groups: int,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Run validated SeedVR2 temporal-interleaved FP16 GroupNorm contracts."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.group_norm_seedvr_bmg(input, num_groups, weight, bias, eps)
+    return _get_native().group_norm_seedvr_bmg(
+        input, num_groups, weight, bias, eps
+    )
+
+
+@compile_op("rms_norm", fake_rms_norm)
+def rms_norm(
+    weight: torch.Tensor, input: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    RMSNorm (Root Mean Square Normalization) using ESIMD optimization.
+
+    RMSNorm normalizes input by the RMS of the elements:
+        output = (input / sqrt(mean(input^2) + eps)) * weight
+
+    Args:
+        weight: Weight tensor of shape [hidden_size]
+        input: Input tensor of shape [batch_size, hidden_size]
+        eps: Small constant for numerical stability
+
+    Returns:
+        Normalized tensor of same shape as input
+
+    Note:
+        - Input must be 2D tensor [batch_size, hidden_size]
+        - hidden_size must be <= 8192 and divisible by 32, except that a
+          validated PTL-H or BMG binary may additionally advertise native
+          FP16 H120 support
+        - Supports fp32, fp16, bf16
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm(weight, input, eps)
+    return _get_native().rms_norm(weight, input, eps)
+
+
+@compile_op("rms_norm_segmented_modulation", _meta.norm_segmented)
+def _segmented_modulation(
+    weight: torch.Tensor, input: torch.Tensor, scale: torch.Tensor,
+    shift: torch.Tensor, starts: List[int], stops: List[int], rows: List[int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    return _get_native().rms_norm_segmented_modulation(
+        weight, input, scale, shift, starts, stops, rows, eps
+    )
+
+
+def rms_norm_segmented_modulation(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    segments: Sequence[tuple[int, int, int]],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse RMSNorm and ordered segmented scale/shift modulation.
+
+    This route preserves BF16 materialization after RMSNorm, ``1 + scale``,
+    multiplication, and shift addition. ``segments`` must contain one to eight
+    ordered contiguous ``(start, stop, modulation_row)`` integer triples that
+    cover the complete contiguous BF16 ``[S,5376]`` input. Scale and shift may
+    be row-strided ``[modulation_rows,5376]`` views.
+
+    Availability comes from the installed BMG binary and an XPU input, not a
+    product-SKU whitelist. Callers must query
+    :func:`rms_norm_segmented_modulation_supported` and retain their normal
+    fallback for unsupported binaries, devices or tensor contracts.
+    """
+    starts = []
+    stops = []
+    modulation_rows = []
+    for segment in segments:
+        if not isinstance(segment, (tuple, list)) or len(segment) != 3:
+            raise TypeError(
+                "segments must contain (start, stop, modulation_row) triples"
+            )
+        if any(type(value) is not int for value in segment):
+            raise TypeError("segment values must be Python integers")
+        start, stop, modulation_row = segment
+        starts.append(start)
+        stops.append(stop)
+        modulation_rows.append(modulation_row)
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm_segmented_modulation(
+            weight, input, scale, shift, starts, stops, modulation_rows, eps
+        )
+    return _get_native().rms_norm_segmented_modulation(
+        weight,
+        input,
+        scale,
+        shift,
+        starts,
+        stops,
+        modulation_rows,
+        eps,
+    )
+
+
+@compile_op("rms_norm_gate_residual", _meta.norm_gate)
+def rms_norm_gate_residual(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    gate: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse the validated PTL-H Z-Image RMSNorm/gate/residual chain.
+
+    Equivalent to ``residual + gate * rms_norm(weight, input, eps)`` with
+    BF16 materialization after RMSNorm and after the gate multiply. The native
+    route accepts contiguous BF16 ``input``/``residual`` tensors shaped
+    ``[M, 3840]`` for M=64, 1024, or 1088, plus 1D weight/gate tensors.
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm_gate_residual(weight, input, gate, residual, eps)
+    native = _get_native()
+    if not hasattr(native, "rms_norm_gate_residual"):
+        raise RuntimeError(
+            "rms_norm_gate_residual is only available in a PTL-H native build"
+        )
+    return native.rms_norm_gate_residual(
+        weight, input, gate, residual, eps
+    )
+
+
+@compile_op("layer_norm", fake_layer_norm)
+def layer_norm(
+    input: torch.Tensor,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """
+    LayerNorm using ESIMD optimization.
+
+    LayerNorm normalizes input by mean and variance:
+        output = ((input - mean) / sqrt(var + eps)) * weight + bias
+
+    Args:
+        input: Input tensor of shape [batch_size, hidden_size]
+        weight: Optional weight tensor of shape [hidden_size]
+        bias: Optional bias tensor of shape [hidden_size]
+        eps: Small constant for numerical stability
+
+    Returns:
+        Normalized tensor of same shape as input
+
+    Note:
+        - Input must be 2D tensor [batch_size, hidden_size]
+        - hidden_size must be <= 8192 and divisible by 32
+        - Supports fp32, fp16, bf16
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.layer_norm(input, weight, bias, eps)
+    return _get_native().layer_norm(input.contiguous(), weight, bias, eps)
+
+
+@compile_op("fused_add_rms_norm", _meta.void, mutates_args=("input", "residual"))
+def fused_add_rms_norm(
+    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
+) -> None:
+    """
+    Fused Add + RMSNorm using ESIMD optimization (in-place).
+
+    Performs in-place:
+        residual += input
+        input = rmsnorm(residual) * weight
+
+    This fuses the residual addition and RMSNorm into a single kernel,
+    reducing memory bandwidth by avoiding an extra read/write pass.
+
+    Args:
+        input: Input tensor of shape [batch_size, hidden_size]. Modified in-place
+               to contain the normalized output.
+        residual: Residual tensor of shape [batch_size, hidden_size]. Modified
+                  in-place to contain residual + original input.
+        weight: Weight tensor of shape [hidden_size].
+        eps: Small constant for numerical stability.
+
+    Note:
+        - Both input and residual are modified in-place
+        - Tensors must be 2D [batch_size, hidden_size]
+        - hidden_size must be <= 8192 and divisible by 32
+        - Supports fp32, fp16, bf16
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_add_rms_norm(input, residual, weight, eps)
+    _get_native().fused_add_rms_norm(input, residual, weight, eps)
+
+
+@compile_op("fused_rms_norm_linear", _meta.norm_projection)
+def fused_rms_norm_linear(
+    input: torch.Tensor,
+    norm_weight: torch.Tensor,
+    proj_weight: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Fused RMSNorm + Linear projection in single C++ call.
+
+    Equivalent to: F.linear(rms_norm(norm_weight, input, eps), proj_weight)
+    But avoids Python roundtrip and keeps normalized data warm in L3 cache.
+
+    Args:
+        input: [M, K] activation tensor
+        norm_weight: [K] RMSNorm weight
+        proj_weight: [N, K] linear projection weight
+        eps: RMSNorm epsilon
+
+    Returns:
+        [M, N] projected output
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_rms_norm_linear(input, norm_weight, proj_weight, eps)
+    return _get_native().fused_rms_norm_linear(input, norm_weight, proj_weight, eps)
+
+
+@compile_op("fused_adaln", _meta.unchanged)
+def fused_adaln(
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    row_repeat: int = 1,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse LayerNorm and AdaLN modulation into one ESIMD kernel."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_adaln(input, scale, shift, row_repeat, eps)
+    return _get_native().fused_adaln(input, scale, shift, row_repeat, eps)
+
+
+@compile_op("fused_rms_adaln", _meta.unchanged)
+def fused_rms_adaln(
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    row_repeat: int = 1,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse RMSNorm and AdaLN modulation into one ESIMD kernel."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_rms_adaln(input, scale, shift, row_repeat, eps)
+    return _get_native().fused_rms_adaln(input, scale, shift, row_repeat, eps)
+
+
+__all__ = [
+    "group_norm_bmg",
+    "group_norm_seedvr_bmg",
+    "rms_norm",
+    "rms_norm_segmented_modulation",
+    "rms_norm_segmented_modulation_supported",
+    "rms_norm_gate_residual",
+    "layer_norm",
+    "fused_add_rms_norm",
+    "fused_rms_norm_linear",
+    "fused_adaln",
+    "fused_rms_adaln",
+    "supports_group_norm_bmg",
+    "supports_group_norm_seedvr_bmg",
+    "supports_rms_norm_segmented_modulation",
+]

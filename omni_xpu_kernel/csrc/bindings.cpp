@@ -1,0 +1,862 @@
+// ============================================================================
+// omni_xpu_kernel - Python Bindings
+// ============================================================================
+// High-performance Intel XPU ESIMD kernels for ComfyUI
+// 
+// GGUF Dequantization: Q4_0, Q4_1, Q8_0, Q4_K, Q6_K
+// Normalization: RMSNorm, LayerNorm
+// SVDQuant: W4A4 dequantization, quantization, and oneDNN GEMM for nunchaku
+// Rotary: Fused rotary position embedding
+// ============================================================================
+
+#include <torch/extension.h>
+#include <pybind11/stl.h>
+
+#include "bmg_kernel_policy.h"
+#include "device_utils.h"
+#include "kernel_tuning_overrides.h"
+#include "utils.h"
+
+namespace omni_xpu {
+namespace layout {
+#if defined(OMNI_XPU_ARCH_BMG)
+    torch::Tensor cat_pad_bmg(
+        torch::Tensor prefix, torch::Tensor input, int64_t spatial_pad);
+#endif
+}
+namespace gguf {
+    torch::Tensor dequantize_q4_0(const torch::Tensor& input, torch::ScalarType dtype);
+    torch::Tensor dequantize_q4_1(const torch::Tensor& input, torch::ScalarType dtype);
+    torch::Tensor dequantize_q8_0(const torch::Tensor& input, torch::ScalarType dtype);
+    torch::Tensor dequantize_q4_k(const torch::Tensor& input, torch::ScalarType dtype);
+    torch::Tensor dequantize_q6_k(const torch::Tensor& input, torch::ScalarType dtype);
+    std::vector<torch::Tensor> dequantize_batch(
+        const std::vector<torch::Tensor>& inputs,
+        const std::vector<std::string>& formats,
+        torch::ScalarType dtype);
+}
+namespace norm {
+    torch::Tensor rms_norm(torch::Tensor weight, torch::Tensor input, double eps);
+#if defined(OMNI_XPU_ARCH_BMG)
+    bool rms_norm_segmented_modulation_supported(torch::Tensor input);
+    torch::Tensor rms_norm_segmented_modulation(
+        torch::Tensor weight, torch::Tensor input, torch::Tensor scale,
+        torch::Tensor shift, const std::vector<int64_t>& starts,
+        const std::vector<int64_t>& stops,
+        const std::vector<int64_t>& modulation_rows, double eps);
+    torch::Tensor group_norm_bmg(
+        torch::Tensor input, int64_t groups, torch::Tensor weight,
+        torch::Tensor bias, double eps);
+    torch::Tensor group_norm_seedvr_bmg(
+        torch::Tensor input, int64_t groups, torch::Tensor weight,
+        torch::Tensor bias, double eps);
+#endif
+#if defined(OMNI_XPU_ARCH_PTL_H)
+    torch::Tensor rms_norm_gate_residual(
+        torch::Tensor weight, torch::Tensor input, torch::Tensor gate,
+        torch::Tensor residual, double eps);
+#endif
+    torch::Tensor layer_norm(torch::Tensor input, std::optional<torch::Tensor> weight, std::optional<torch::Tensor> bias, double eps);
+    void fused_add_rms_norm(torch::Tensor input, torch::Tensor residual, torch::Tensor weight, double eps);
+    torch::Tensor fused_rms_norm_linear(torch::Tensor input, torch::Tensor norm_weight, torch::Tensor proj_weight, double eps);
+    torch::Tensor fused_adaln(torch::Tensor input, torch::Tensor modulation_scale, torch::Tensor modulation_shift, int64_t row_repeat, double eps);
+    torch::Tensor fused_rms_adaln(torch::Tensor input, torch::Tensor modulation_scale, torch::Tensor modulation_shift, int64_t row_repeat, double eps);
+}
+namespace svdq {
+    torch::Tensor dequantize_svdq_w4(const torch::Tensor& packed, const torch::Tensor& scales, torch::ScalarType out_dtype);
+    torch::Tensor dequantize_svdq_u4(const torch::Tensor& packed, const torch::Tensor& scales, torch::ScalarType out_dtype);
+    torch::Tensor unpack_svdq_int4(const torch::Tensor& packed, bool is_signed);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_svdq_act_int4(const torch::Tensor& input, int64_t group_size);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_svdq_act_uint4(const torch::Tensor& input, int64_t group_size);
+    torch::Tensor onednn_int4_gemm(const torch::Tensor& act, const torch::Tensor& packed, const torch::Tensor& wscales);
+    torch::Tensor onednn_int4_gemm_preconverted(const torch::Tensor& act, const torch::Tensor& packed_u4, const torch::Tensor& scales_f16);
+    void onednn_int4_gemm_add_to_output(const torch::Tensor& act, const torch::Tensor& packed_u4, const torch::Tensor& scales_f16, torch::Tensor& dst);
+    void fused_convert_add(torch::Tensor& out, const torch::Tensor& result, const torch::Tensor& residual);
+    torch::Tensor fused_smooth_convert(const torch::Tensor& x, const torch::Tensor& smooth_factor);
+    torch::Tensor fused_smooth_mul_convert(const torch::Tensor& x, const torch::Tensor& rcp_smooth);
+}
+namespace rotary {
+    torch::Tensor rotary_emb(const torch::Tensor& x, const torch::Tensor& cos_cache, const torch::Tensor& sin_cache, int64_t seq_len, int64_t heads);
+    torch::Tensor apply_kitchen_rope1(const torch::Tensor& x, const torch::Tensor& freqs_cis);
+    std::tuple<torch::Tensor, torch::Tensor> apply_kitchen_rope(const torch::Tensor& xq, const torch::Tensor& xk, const torch::Tensor& freqs_cis);
+    torch::Tensor apply_kitchen_rope_split_half1(const torch::Tensor& x, const torch::Tensor& freqs_cis);
+    std::tuple<torch::Tensor, torch::Tensor> apply_kitchen_rope_split_half(const torch::Tensor& xq, const torch::Tensor& xk, const torch::Tensor& freqs_cis);
+    torch::Tensor rms_kitchen_rope1(
+        torch::Tensor x, torch::Tensor freqs_cis, torch::Tensor scale,
+        double epsilon, bool split_half, int64_t rot_dim, bool inplace);
+    std::tuple<torch::Tensor, torch::Tensor> rms_kitchen_rope(
+        torch::Tensor q, torch::Tensor k, torch::Tensor freqs_cis,
+        torch::Tensor q_scale, torch::Tensor k_scale, double epsilon,
+        bool split_half, int64_t rot_dim, bool inplace);
+    bool kitchen_rope_fast_supported(const torch::Tensor& x, const torch::Tensor& freqs);
+    bool ltx_split_rope_direct_supported(
+        const torch::Tensor& input,
+        const torch::Tensor& cos,
+        const torch::Tensor& sin);
+    torch::Tensor apply_ltx_split_rope_direct(
+        const torch::Tensor& input,
+        const torch::Tensor& cos,
+        const torch::Tensor& sin);
+}
+namespace sdp {
+    torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v);
+}
+namespace linear {
+    torch::Tensor onednn_w8a16_fp8(torch::Tensor input, torch::Tensor weight, torch::Tensor scale_w, std::optional<torch::Tensor> bias);
+    void fp8_cache_clear();
+    std::tuple<int64_t, int64_t, int64_t> fp8_cache_stats();
+    std::tuple<int64_t, int64_t, int64_t> fp8_failure_cache_stats();
+}
+namespace fp8 {
+    torch::Tensor quantize_per_tensor(const torch::Tensor& input, const torch::Tensor& scale, torch::ScalarType out_dtype);
+    torch::Tensor dequantize_per_tensor(const torch::Tensor& input, const torch::Tensor& scale, torch::ScalarType out_dtype);
+    torch::Tensor stochastic_rounding(const torch::Tensor& input, const torch::Tensor& rng, torch::ScalarType out_dtype);
+}
+namespace int8_ops {
+    torch::Tensor mm_int8(torch::Tensor a, torch::Tensor b);
+    torch::Tensor int8_linear(torch::Tensor x, torch::Tensor weight, torch::Tensor weight_scale,
+                              std::optional<torch::Tensor> bias, int64_t out_dtype_code,
+                              bool convrot, int64_t convrot_groupsize);
+    torch::Tensor int8_linear_prequantized(
+        torch::Tensor x_int8, torch::Tensor x_scale, torch::Tensor weight,
+        torch::Tensor weight_scale, std::optional<torch::Tensor> bias,
+        int64_t out_dtype_code);
+    torch::Tensor int8_linear_prequantized_out(
+        torch::Tensor x_int8, torch::Tensor x_scale, torch::Tensor weight,
+        torch::Tensor weight_scale, std::optional<torch::Tensor> bias,
+        int64_t out_dtype_code, torch::Tensor output);
+#if defined(OMNI_XPU_ARCH_BMG)
+    std::tuple<torch::Tensor, torch::Tensor> int8_linear_pair_prequantized(
+        torch::Tensor x_int8, torch::Tensor x_scale,
+        torch::Tensor weight1, torch::Tensor weight_scale1,
+        torch::Tensor weight2, torch::Tensor weight_scale2,
+        int64_t out_dtype_code);
+#endif
+    std::tuple<torch::Tensor, torch::Tensor> int8_linear_shared_input(
+        torch::Tensor x, torch::Tensor weight1, torch::Tensor weight_scale1,
+        torch::Tensor weight2, torch::Tensor weight_scale2,
+        std::optional<torch::Tensor> bias1, std::optional<torch::Tensor> bias2,
+        int64_t out_dtype_code);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_tensorwise(
+        torch::Tensor x, std::optional<torch::Tensor> scale, int64_t stochastic_rounding);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_rowwise(
+        torch::Tensor x, int64_t stochastic_rounding);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_rowwise_fused(torch::Tensor x);
+#if defined(OMNI_XPU_ARCH_BMG)
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_g16_bmg(
+        torch::Tensor input);
+#endif
+    torch::Tensor fused_silu_mul(torch::Tensor x1, torch::Tensor x2);
+    torch::Tensor fused_silu_mul_exact_bf16(
+        torch::Tensor gate, torch::Tensor up);
+    std::tuple<torch::Tensor, torch::Tensor> fused_silu_mul_quantize_rowwise(
+        torch::Tensor x1, torch::Tensor x2);
+    std::tuple<torch::Tensor, torch::Tensor> fused_swiglu_quantize_rowwise(
+        torch::Tensor input);
+    std::tuple<torch::Tensor, torch::Tensor> fused_gelu_tanh_quantize_rowwise(
+        torch::Tensor input);
+    torch::Tensor rotate_convrot(torch::Tensor input, int64_t group_size);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_weight(
+        torch::Tensor weight, int64_t group_size, int64_t stochastic_rounding);
+    torch::Tensor dequantize_int8_convrot_weight(
+        torch::Tensor q, torch::Tensor scale, int64_t group_size);
+    torch::Tensor fused_scaleback(torch::Tensor gemm_result, torch::Tensor x_scale,
+                                  torch::Tensor w_scale, std::optional<torch::Tensor> bias,
+                                  int64_t out_dtype_code);
+    torch::Tensor dequantize_int8_simple(torch::Tensor q, torch::Tensor scale);
+    torch::Tensor dequantize_int8_simple_dtype(torch::Tensor q, torch::Tensor scale, int64_t output_dtype_code);
+    void int8_cache_clear();
+    std::tuple<int64_t, int64_t, int64_t> int8_cache_stats();
+}
+}
+
+namespace {
+
+template<typename Policy>
+py::dict bmg_kernel_policy_dict() {
+    py::dict policy;
+    policy["adaln"] = py::make_tuple(
+        Policy::adaln_block_size,
+        Policy::adaln_work_group_size);
+    policy["int8_dequant_fp32"] = py::make_tuple(
+        Policy::int8_dequant_fp32_elements,
+        Policy::int8_dequant_fp32_work_group_size);
+    policy["int8_dequant_fp16"] = py::make_tuple(
+        Policy::int8_dequant_fp16_elements,
+        Policy::int8_dequant_fp16_work_group_size);
+    policy["int8_dequant_bf16"] = py::make_tuple(
+        Policy::int8_dequant_bf16_elements,
+        Policy::int8_dequant_bf16_work_group_size);
+    policy["int8_scaleback"] = py::make_tuple(
+        Policy::int8_scaleback_elements,
+        Policy::int8_scaleback_work_group_rows,
+        Policy::int8_scaleback_work_group_cols);
+    policy["convrot_g16"] = py::make_tuple(
+        Policy::convrot_g16_groups_per_dpas,
+        Policy::convrot_g16_work_items_per_row);
+    policy["fp8_stochastic_elements"] =
+        Policy::fp8_stochastic_elements;
+    policy["svdq_dequant"] = py::make_tuple(
+        Policy::svdq_dequant_groups,
+        Policy::svdq_dequant_work_group_size);
+    policy["svdq_quant"] = py::make_tuple(
+        Policy::svdq_quant_groups,
+        Policy::svdq_quant_work_group_size);
+    policy["svdq_smooth"] = py::make_tuple(
+        Policy::svdq_smooth_elements,
+        Policy::svdq_smooth_work_group_size);
+    policy["svdq_convert_add_elements"] =
+        Policy::svdq_convert_add_elements;
+    policy["kitchen_rope"] = py::make_tuple(
+        Policy::kitchen_rope_pairs_per_work_item,
+        Policy::kitchen_rope_work_group_size);
+    policy["d120_l4205_v_tile"] =
+        Policy::d120_l4205_v_tile;
+    policy["h3_vae_d64_s1797_kv_tile"] =
+        Policy::h3_vae_d64_s1797_kv_tile;
+    return policy;
+}
+
+py::dict b580_candidate_kernel_policy_dict(
+        omni_xpu::device::B580PolicyCandidate candidate) {
+    using Candidate = omni_xpu::device::B580PolicyCandidate;
+    switch (candidate) {
+        case Candidate::adaln:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580AdalnCandidatePolicy>();
+        case Candidate::int8_dequant_fp32:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580Int8DequantFp32CandidatePolicy>();
+        case Candidate::int8_dequant_bf16:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580Int8DequantBf16CandidatePolicy>();
+        case Candidate::int8_scaleback:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580Int8ScalebackCandidatePolicy>();
+        case Candidate::convrot_g16:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580ConvrotG16CandidatePolicy>();
+        case Candidate::fp8_stochastic:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580Fp8StochasticCandidatePolicy>();
+        case Candidate::svdq_dequant:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580SvdqDequantCandidatePolicy>();
+        case Candidate::svdq_quant:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580SvdqQuantCandidatePolicy>();
+        case Candidate::svdq_smooth:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580SvdqSmoothCandidatePolicy>();
+        case Candidate::svdq_convert_add:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580SvdqConvertAddCandidatePolicy>();
+        case Candidate::kitchen_rope:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580KitchenRopeCandidatePolicy>();
+        case Candidate::d120_l4205_v_tile:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580D120L4205CandidatePolicy>();
+        case Candidate::h3_vae_d64_s1797_kv_tile:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580H3VaeD64S1797CandidatePolicy>();
+        default:
+            return bmg_kernel_policy_dict<
+                omni_xpu::device::B580KernelPolicy>();
+    }
+}
+
+py::dict kernel_tuning_overrides_dict() {
+    py::dict overrides;
+#define OMNI_EXPORT_TUNING_OVERRIDE(NAME) overrides[#NAME] = NAME
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_FP8_DEQUANT_ELEMENTS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_FP8_QUANT_VEC);
+    OMNI_EXPORT_TUNING_OVERRIDE(
+        OMNI_FP8_STOCHASTIC_ELEMENTS_PER_WORK_ITEM);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_CONVROT_DEQUANT_WG_SIZE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_CONVROT_QUANT_WG_SIZE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_INT8_DEQUANT_ELEMENTS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SILU_MUL_ELEMENTS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_INT8_TENSORWISE_VEC);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_KITCHEN_ROPE_PAIR_SAME_SHAPE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_KITCHEN_ROPE_PAIR_WG_SIZE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SVDQ_DEQUANT_GROUPS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SVDQ_QUANT_GROUPS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SVDQ_UNPACK_COLS_PER_WI);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SVDQ_UNPACK_BYTES_PER_ITERATION);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_SVDQ_UNPACK_WG_SIZE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_RMS_NORM_H120_MODE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_RMS_NORM_H128_BLOCK_SIZE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_GROUP_NORM_BMG_TILE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_GROUP_NORM_BMG_REDUCE_VECTOR);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_H3_RMS_ROPE_FAST_REDUCE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_H3_RMS_ROPE_SLM_BF16);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_ROWQ_VECTOR_WIDTH_OVERRIDE);
+    OMNI_EXPORT_TUNING_OVERRIDE(OMNI_ROWQ_SUBGROUPS_PER_ROW_OVERRIDE);
+#undef OMNI_EXPORT_TUNING_OVERRIDE
+    return overrides;
+}
+
+}  // namespace
+
+PYBIND11_MODULE(_C, m) {
+    m.doc() = "omni_xpu_kernel - High-performance Intel XPU ESIMD kernels for ComfyUI";
+
+    // This marker is deliberately compiled into the native artifact. Python
+    // dispatchers use it to distinguish a target-AOT core from older JIT core
+    // builds; package metadata alone cannot detect a stale _C shared library.
+#if defined(OMNI_XPU_CORE_AOT) && defined(OMNI_XPU_ARCH_PTL_H)
+    m.attr("__core_aot_target__") = "ptl-h";
+#elif defined(OMNI_XPU_CORE_AOT) && defined(OMNI_XPU_ARCH_BMG)
+    m.attr("__core_aot_target__") = "bmg";
+#else
+    m.attr("__core_aot_target__") = "";
+#endif
+
+    // Exact runtime device identity. One BMG AOT image contains all profiles;
+    // host dispatch selects from the input device's queue without guessing from
+    // memory size, EU count, or the marketing name.
+    auto device = m.def_submodule(
+        "device", "Exact Intel BMG identity and kernel-profile selection");
+    device.def(
+        "classify_bmg_device_id",
+        [](uint32_t device_id) {
+            return std::string(omni_xpu::device::bmg_sku_name(
+                omni_xpu::device::classify_bmg_device_id(device_id)));
+        },
+        py::arg("device_id"));
+    device.def(
+        "bmg_sku",
+        [](int64_t index) {
+            auto& queue = omni_xpu::utils::get_queue(
+                torch::Device(torch::kXPU, index));
+            return std::string(omni_xpu::device::bmg_sku_name(
+                omni_xpu::device::get_bmg_selection(queue).effective_sku));
+        },
+        py::arg("index") = 0);
+    device.def(
+        "physical_bmg_sku",
+        [](int64_t index) {
+            auto& queue = omni_xpu::utils::get_queue(
+                torch::Device(torch::kXPU, index));
+            return std::string(omni_xpu::device::bmg_sku_name(
+                omni_xpu::device::get_bmg_selection(queue).physical_sku));
+        },
+        py::arg("index") = 0);
+    device.def(
+        "kernel_profile",
+        [](int64_t index) {
+            auto& queue = omni_xpu::utils::get_queue(
+                torch::Device(torch::kXPU, index));
+            return std::string(omni_xpu::device::bmg_kernel_profile_name(
+                omni_xpu::device::get_bmg_selection(queue).kernel_profile));
+        },
+        py::arg("index") = 0);
+    device.def(
+        "b580_policy_candidate",
+        [](int64_t index) {
+            auto& queue = omni_xpu::utils::get_queue(
+                torch::Device(torch::kXPU, index));
+            return std::string(
+                omni_xpu::device::b580_policy_candidate_name(
+                    omni_xpu::device::get_bmg_selection(queue)
+                        .b580_policy_candidate));
+        },
+        py::arg("index") = 0);
+    device.def(
+        "info",
+        [](int64_t index) {
+            auto& queue = omni_xpu::utils::get_queue(
+                torch::Device(torch::kXPU, index));
+            const auto sycl_device = queue.get_device();
+            const uint32_t device_id =
+                omni_xpu::device::get_device_id(sycl_device);
+            const auto selection =
+                omni_xpu::device::get_bmg_selection(sycl_device);
+            py::dict result;
+            result["index"] = index;
+            result["name"] =
+                sycl_device.get_info<sycl::info::device::name>();
+            result["device_id"] = device_id;
+            result["physical_bmg_sku"] = std::string(
+                omni_xpu::device::bmg_sku_name(selection.physical_sku));
+            result["bmg_sku"] = std::string(
+                omni_xpu::device::bmg_sku_name(selection.effective_sku));
+            result["sku_forced"] = selection.forced;
+            result["kernel_profile"] = std::string(
+                omni_xpu::device::bmg_kernel_profile_name(
+                    selection.kernel_profile));
+            result["b580_policy_candidate"] = std::string(
+                omni_xpu::device::b580_policy_candidate_name(
+                    selection.b580_policy_candidate));
+            result["sku_profile_id"] = std::string(
+                omni_xpu::device::bmg_sku_profile_id(
+                    selection.physical_sku));
+            result["physical_build_target"] = std::string(
+                omni_xpu::device::bmg_sku_build_target(
+                    selection.physical_sku));
+            result["policy_id"] = std::string(
+                omni_xpu::device::kernel_policy_id(
+                    selection.kernel_profile));
+            result["policy_status"] = std::string(
+                omni_xpu::device::kernel_policy_status(
+                    selection.kernel_profile));
+            result["policy_manifest_sha256"] = std::string(
+                omni_xpu::device::policy_manifest_sha256);
+            result["build_tuning_policy_id"] = std::string(
+                omni_xpu::tuning::build_tuning_policy_id);
+            result["tuning_candidate_build"] =
+                omni_xpu::tuning::is_candidate_build();
+            result["performance_claim_allowed"] =
+                !selection.forced &&
+                selection.b580_policy_candidate ==
+                    omni_xpu::device::B580PolicyCandidate::none &&
+                omni_xpu::device::kernel_policy_performance_claim_allowed(
+                    selection.kernel_profile) &&
+                !omni_xpu::tuning::is_candidate_build();
+            result["tuning_overrides"] = kernel_tuning_overrides_dict();
+            if (selection.b580_policy_candidate !=
+                    omni_xpu::device::B580PolicyCandidate::none) {
+                result["kernel_policy"] =
+                    b580_candidate_kernel_policy_dict(
+                        selection.b580_policy_candidate);
+            } else if (selection.kernel_profile ==
+                    omni_xpu::device::BmgKernelProfile::b580) {
+                result["kernel_policy"] =
+                    bmg_kernel_policy_dict<
+                        omni_xpu::device::B580KernelPolicy>();
+            } else if (selection.kernel_profile ==
+                    omni_xpu::device::BmgKernelProfile::b60) {
+                result["kernel_policy"] =
+                    bmg_kernel_policy_dict<
+                        omni_xpu::device::B60KernelPolicy>();
+            } else if (selection.kernel_profile ==
+                    omni_xpu::device::BmgKernelProfile::b70) {
+                result["kernel_policy"] =
+                    bmg_kernel_policy_dict<
+                        omni_xpu::device::B70KernelPolicy>();
+            } else {
+                result["kernel_policy"] =
+                    bmg_kernel_policy_dict<
+                        omni_xpu::device::GenericBmgKernelPolicy>();
+            }
+            return result;
+        },
+        py::arg("index") = 0);
+
+    auto layout = m.def_submodule(
+        "layout", "Validated layout and materialization fusions");
+#if defined(OMNI_XPU_ARCH_BMG)
+    layout.attr("__cat_pad_bmg__") = true;
+    layout.def(
+        "cat_pad_bmg",
+        &omni_xpu::layout::cat_pad_bmg,
+        "BMG temporal-prefix concatenation and symmetric spatial zero-pad",
+        py::arg("prefix"), py::arg("input"), py::arg("spatial_pad") = 1);
+#else
+    layout.attr("__cat_pad_bmg__") = false;
+#endif
+    
+    // GGUF Dequantization
+    auto gguf = m.def_submodule("gguf", "GGUF dequantization kernels");
+    
+    gguf.def("dequantize_q4_0", &omni_xpu::gguf::dequantize_q4_0,
+        "Dequantize Q4_0 tensor (18 bytes/block -> 32 elements)",
+        py::arg("input"), py::arg("dtype") = torch::kFloat16);
+
+    gguf.def("dequantize_q4_1", &omni_xpu::gguf::dequantize_q4_1,
+        "Dequantize Q4_1 tensor (20 bytes/block -> 32 elements)",
+        py::arg("input"), py::arg("dtype") = torch::kFloat16);
+    
+    gguf.def("dequantize_q8_0", &omni_xpu::gguf::dequantize_q8_0,
+        "Dequantize Q8_0 tensor (34 bytes/block -> 32 elements)",
+        py::arg("input"), py::arg("dtype") = torch::kFloat16);
+    
+    gguf.def("dequantize_q4_k", &omni_xpu::gguf::dequantize_q4_k,
+        "Dequantize Q4_K tensor (144 bytes/block -> 256 elements)",
+        py::arg("input"), py::arg("dtype") = torch::kFloat16);
+    
+    gguf.def("dequantize_q6_k", &omni_xpu::gguf::dequantize_q6_k,
+        "Dequantize Q6_K tensor (210 bytes/block -> 256 elements)",
+        py::arg("input"), py::arg("dtype") = torch::kFloat16);
+
+    gguf.def("dequantize_batch", &omni_xpu::gguf::dequantize_batch,
+        "Batch dequantize multiple tensors in fewer kernel launches.\n"
+        "Groups tensors by format, concatenates, launches one kernel per format group,\n"
+        "then splits outputs. Reduces N submissions to num_format_types submissions.\n"
+        "Input: inputs=[tensor1, tensor2, ...], formats=['q4_0', 'q4_1', ...], dtype\n"
+        "Output: list of dequantized tensors in same order as inputs",
+        py::arg("inputs"), py::arg("formats"), py::arg("dtype") = torch::kFloat16);
+
+    // Normalization
+    auto norm = m.def_submodule("norm", "Normalization kernels");
+
+#if defined(OMNI_XPU_ARCH_PTL_H) || defined(OMNI_XPU_ARCH_BMG)
+    norm.attr("__h120_fp16__") = true;
+#else
+    norm.attr("__h120_fp16__") = false;
+#endif
+    
+    norm.def("rms_norm", &omni_xpu::norm::rms_norm,
+        "RMSNorm using ESIMD optimization",
+        py::arg("weight"), py::arg("input"), py::arg("eps") = 1e-6);
+
+#if defined(OMNI_XPU_ARCH_BMG)
+    norm.attr("__rms_norm_segmented_modulation__") = true;
+    norm.attr("__group_norm_bmg__") = true;
+    norm.attr("__group_norm_seedvr_bmg__") = true;
+    norm.def(
+        "rms_norm_segmented_modulation_supported",
+        &omni_xpu::norm::rms_norm_segmented_modulation_supported,
+        "Whether native policy enables segmented RMSNorm modulation",
+        py::arg("input"));
+    norm.def(
+        "rms_norm_segmented_modulation",
+        &omni_xpu::norm::rms_norm_segmented_modulation,
+        "RMSNorm plus ordered segmented BF16 scale/shift modulation",
+        py::arg("weight"), py::arg("input"), py::arg("scale"),
+        py::arg("shift"), py::arg("starts"), py::arg("stops"),
+        py::arg("modulation_rows"), py::arg("eps") = 1e-6);
+    norm.def(
+        "group_norm_bmg",
+        &omni_xpu::norm::group_norm_bmg,
+        "BMG GroupNorm for validated Boogu Image Turbo activation shapes",
+        py::arg("input"), py::arg("groups"), py::arg("weight"),
+        py::arg("bias"), py::arg("eps") = 1e-6);
+    norm.def(
+        "group_norm_seedvr_bmg",
+        &omni_xpu::norm::group_norm_seedvr_bmg,
+        "BMG GroupNorm for validated SeedVR2 temporal-interleaved activations",
+        py::arg("input"), py::arg("groups"), py::arg("weight"),
+        py::arg("bias"), py::arg("eps") = 1e-6);
+#else
+    norm.attr("__rms_norm_segmented_modulation__") = false;
+    norm.attr("__group_norm_bmg__") = false;
+    norm.attr("__group_norm_seedvr_bmg__") = false;
+#endif
+
+#if defined(OMNI_XPU_ARCH_PTL_H)
+    norm.def(
+        "rms_norm_gate_residual",
+        &omni_xpu::norm::rms_norm_gate_residual,
+        "PTL-H fused Z-Image RMSNorm, BF16 gate multiply, and residual add",
+        py::arg("weight"), py::arg("input"), py::arg("gate"),
+        py::arg("residual"), py::arg("eps") = 1e-6);
+#endif
+    
+    norm.def("layer_norm", &omni_xpu::norm::layer_norm,
+        "LayerNorm using ESIMD optimization",
+        py::arg("input"), py::arg("weight") = py::none(), py::arg("bias") = py::none(), py::arg("eps") = 1e-5);
+    
+    norm.def("fused_add_rms_norm", &omni_xpu::norm::fused_add_rms_norm,
+        "Fused Add + RMSNorm using ESIMD optimization (in-place: residual += input, input = rmsnorm(residual) * weight)",
+        py::arg("input"), py::arg("residual"), py::arg("weight"), py::arg("eps") = 1e-6);
+
+    norm.def("fused_rms_norm_linear", &omni_xpu::norm::fused_rms_norm_linear,
+        "Fused RMSNorm + Linear projection in single C++ call.\n"
+        "Chains norm and matmul without Python roundtrip, keeping normalized data in L3 cache.\n"
+        "output = RMSNorm(input, norm_weight, eps) @ proj_weight.T\n"
+        "Input: input [M, K], norm_weight [K], proj_weight [N, K]\n"
+        "Output: [M, N]",
+        py::arg("input"), py::arg("norm_weight"), py::arg("proj_weight"), py::arg("eps") = 1e-6);
+    norm.def("fused_adaln", &omni_xpu::norm::fused_adaln,
+        "Fused LayerNorm and Kitchen AdaLN modulation in one ESIMD kernel",
+        py::arg("input"), py::arg("scale"), py::arg("shift"),
+        py::arg("row_repeat") = 1, py::arg("eps") = 1e-6);
+    norm.def("fused_rms_adaln", &omni_xpu::norm::fused_rms_adaln,
+        "Fused RMSNorm and Kitchen AdaLN modulation in one ESIMD kernel",
+        py::arg("input"), py::arg("scale"), py::arg("shift"),
+        py::arg("row_repeat") = 1, py::arg("eps") = 1e-6);
+
+    // SVDQuant W4A4 Dequantization/Quantization (nunchaku)
+    auto svdq = m.def_submodule("svdq", "SVDQuant W4A4 dequantization and quantization kernels for nunchaku");
+
+    svdq.def("dequantize_svdq_w4", &omni_xpu::svdq::dequantize_svdq_w4,
+        "Dequantize SVDQuant W4 packed weights: unpack INT4 + apply per-group scales -> output dtype\n"
+        "Input: packed [N, K/2] uint8, scales [num_groups, N]\n"
+        "Output: [N, K] dequantized values",
+        py::arg("packed"), py::arg("scales"), py::arg("out_dtype") = torch::kBFloat16);
+    svdq.def("dequantize_svdq_u4", &omni_xpu::svdq::dequantize_svdq_u4,
+        "Dequantize unsigned activation U4 with per-group scales",
+        py::arg("packed"), py::arg("scales"), py::arg("out_dtype") = torch::kBFloat16);
+
+    svdq.def("unpack_svdq_int4", &omni_xpu::svdq::unpack_svdq_int4,
+        "Unpack SVDQuant INT4 packed tensor to int8 (no scaling)\n"
+        "Input: packed [M, K/2] uint8\n"
+        "Output: [M, K] int8 signed values",
+        py::arg("packed"), py::arg("is_signed") = true);
+
+    svdq.def("quantize_svdq_act_int4", &omni_xpu::svdq::quantize_svdq_act_int4,
+        "Quantize activation to SVDQuant INT4 with per-group absmax scaling\n"
+        "Input: [M, K] bf16/f32\n"
+        "Output: (packed [M, K/2] uint8, scales [num_groups, M])",
+        py::arg("input"), py::arg("group_size") = 64);
+    svdq.def("quantize_svdq_act_uint4", &omni_xpu::svdq::quantize_svdq_act_uint4,
+        "Quantize non-negative activation to unsigned U4 [0, 15]",
+        py::arg("input"), py::arg("group_size") = 64);
+
+    svdq.def("onednn_int4_gemm", &omni_xpu::svdq::onednn_int4_gemm,
+        "Fused INT4 dequant + GEMM using oneDNN u4 matmul primitive\n"
+        "Converts signed INT4 to u4 and bf16 scales to f16 per call\n"
+        "Input: act [M, K] bf16/f16/f32, packed [N, K/2] uint8, wscales [G, N] bf16\n"
+        "Output: [M, N] same dtype as act",
+        py::arg("act"), py::arg("packed"), py::arg("wscales"));
+
+    svdq.def("onednn_int4_gemm_preconverted", &omni_xpu::svdq::onednn_int4_gemm_preconverted,
+        "Fused INT4 dequant + GEMM using oneDNN u4 matmul (pre-converted weights)\n"
+        "Accepts already-converted u4 weights (packed^0x88) and f16 scales\n"
+        "Input: act [M, K] bf16/f16/f32, packed_u4 [N, K/2] uint8, scales_f16 [G, N] f16\n"
+        "Output: [M, N] same dtype as act",
+        py::arg("act"), py::arg("packed_u4"), py::arg("scales_f16"));
+
+    svdq.def("onednn_int4_gemm_add_to_output", &omni_xpu::svdq::onednn_int4_gemm_add_to_output,
+        "Fused INT4 GEMM + accumulate into bf16 output using oneDNN append_sum post-op\n"
+        "dst += GEMM(f16_act, u4_wgt) — caller pre-fills dst with residual\n"
+        "Input: act [M, K] f16, packed_u4 [N, K/2] uint8, scales_f16 [G, N] f16, dst [M, N] bf16\n"
+        "Output: dst modified in-place (dst += GEMM result)",
+        py::arg("act"), py::arg("packed_u4"), py::arg("scales_f16"), py::arg("dst"));
+
+    svdq.def("fused_convert_add", &omni_xpu::svdq::fused_convert_add,
+        "Fused f16->bf16 conversion + bf16 addition in single ESIMD kernel\n"
+        "Writes: out = bf16(result[:Mo,:No]) + residual[:Mo,:No]\n"
+        "Input: out [Mo, No] bf16, result [Mr, Nr] f16, residual [Mo, No] bf16",
+        py::arg("out"), py::arg("result"), py::arg("residual"));
+
+    svdq.def("fused_smooth_convert", &omni_xpu::svdq::fused_smooth_convert,
+        "Fused smooth division + bf16->f16 conversion (legacy, uses division)\n"
+        "Input: x [M, K] bf16, smooth_factor [K] bf16\n"
+        "Output: [M, K] f16 = (x / smooth_factor).to(f16)",
+        py::arg("x"), py::arg("smooth_factor"));
+
+    svdq.def("fused_smooth_mul_convert", &omni_xpu::svdq::fused_smooth_mul_convert,
+        "Fused smooth multiply + bf16->f16 conversion (optimized, uses multiply-by-reciprocal)\n"
+        "Input: x [M, K] bf16, rcp_smooth [K] f16 (pre-computed 1/smooth_factor)\n"
+        "Output: [M, K] f16 = (x * rcp_smooth).to(f16)",
+        py::arg("x"), py::arg("rcp_smooth"));
+
+    // Rotary Embedding
+    auto rotary = m.def_submodule("rotary", "Rotary position embedding kernels");
+
+    rotary.def("rotary_emb", &omni_xpu::rotary::rotary_emb,
+        "Fused rotary position embedding using ESIMD optimization\n"
+        "Fuses bf16→f32 promotion + rotary rotation + f32→bf16 demotion\n"
+        "Input: x [total_rows, head_dim] bf16/f16/f32\n"
+        "       cos_cache [S, head_dim/2] f32\n"
+        "       sin_cache [S, head_dim/2] f32\n"
+        "Output: [total_rows, head_dim] same dtype as x",
+        py::arg("x"), py::arg("cos_cache"), py::arg("sin_cache"),
+        py::arg("seq_len"), py::arg("heads"));
+    rotary.def("apply_kitchen_rope1", &omni_xpu::rotary::apply_kitchen_rope1,
+        "Apply a broadcastable arbitrary 2x2 transform to adjacent element pairs",
+        py::arg("x"), py::arg("freqs_cis"));
+    rotary.def("apply_kitchen_rope", &omni_xpu::rotary::apply_kitchen_rope,
+        "Apply Kitchen adjacent-pair RoPE semantics to query and key tensors",
+        py::arg("xq"), py::arg("xk"), py::arg("freqs_cis"));
+    rotary.def("apply_kitchen_rope_split_half1", &omni_xpu::rotary::apply_kitchen_rope_split_half1,
+        "Apply a broadcastable arbitrary 2x2 transform to split-half pairs",
+        py::arg("x"), py::arg("freqs_cis"));
+    rotary.def("apply_kitchen_rope_split_half", &omni_xpu::rotary::apply_kitchen_rope_split_half,
+        "Apply Kitchen split-half RoPE semantics to query and key tensors",
+        py::arg("xq"), py::arg("xk"), py::arg("freqs_cis"));
+    rotary.def(
+        "rms_kitchen_rope1",
+        &omni_xpu::rotary::rms_kitchen_rope1,
+        "Fused RMSNorm and Kitchen arbitrary-matrix RoPE for one tensor",
+        py::arg("x"), py::arg("freqs_cis"), py::arg("scale"),
+        py::arg("epsilon") = 1e-6, py::arg("split_half") = false,
+        py::arg("rot_dim") = 0, py::arg("inplace") = false);
+    rotary.def(
+        "rms_kitchen_rope",
+        &omni_xpu::rotary::rms_kitchen_rope,
+        "Fused RMSNorm and Kitchen arbitrary-matrix RoPE for a query/key pair",
+        py::arg("q"), py::arg("k"), py::arg("freqs_cis"),
+        py::arg("q_scale"), py::arg("k_scale"),
+        py::arg("epsilon") = 1e-6, py::arg("split_half") = false,
+        py::arg("rot_dim") = 0, py::arg("inplace") = false);
+    rotary.def("kitchen_rope_fast_supported", &omni_xpu::rotary::kitchen_rope_fast_supported,
+        "Return whether a tensor pair can use the single-launch Kitchen RoPE kernel",
+        py::arg("x"), py::arg("freqs_cis"));
+    rotary.def(
+        "ltx_split_rope_direct_supported",
+        &omni_xpu::rotary::ltx_split_rope_direct_supported,
+        "Return whether LTX split-half RoPE can consume cos/sin directly",
+        py::arg("input"), py::arg("cos"), py::arg("sin"));
+    rotary.def(
+        "apply_ltx_split_rope_direct",
+        &omni_xpu::rotary::apply_ltx_split_rope_direct,
+        "Apply LTX split-half RoPE directly to contiguous [B,T,H*D] input",
+        py::arg("input"), py::arg("cos"), py::arg("sin"));
+
+    // FP8 Linear (oneDNN W8A16)
+    auto linear = m.def_submodule("linear", "FP8 linear kernels");
+    linear.def("onednn_w8a16_fp8", &omni_xpu::linear::onednn_w8a16_fp8,
+        "FP8 GEMM: W8A16 matmul with E4M3/E5M2 weights via oneDNN.\n"
+        "Input: x [M, K] fp16/bf16, weight [N, K] float8, scales [N] f32\n"
+        "Output: [M, N] same dtype as x",
+        py::arg("input"), py::arg("weight"), py::arg("scale_w"), py::arg("bias") = py::none());
+    linear.def("fp8_cache_clear", &omni_xpu::linear::fp8_cache_clear,
+        "Clear FP8 primitive cache");
+    linear.def("fp8_cache_stats", &omni_xpu::linear::fp8_cache_stats,
+        "Return FP8 cache stats as (hits, misses, size)");
+    linear.def("fp8_failure_cache_stats", &omni_xpu::linear::fp8_failure_cache_stats,
+        "Return failed FP8 primitive cache stats as (failures, negative_hits, size)");
+
+    auto fp8 = m.def_submodule("fp8", "FP8 quantization kernels");
+    fp8.def("quantize_per_tensor", &omni_xpu::fp8::quantize_per_tensor,
+        "Per-tensor FP8 quantization matching Comfy Kitchen semantics",
+        py::arg("input"), py::arg("scale"), py::arg("out_dtype"));
+    fp8.def("dequantize_per_tensor", &omni_xpu::fp8::dequantize_per_tensor,
+        "Per-tensor FP8 dequantization matching Comfy Kitchen semantics",
+        py::arg("input"), py::arg("scale"), py::arg("out_dtype"));
+    fp8.def("stochastic_rounding", &omni_xpu::fp8::stochastic_rounding,
+        "Seed-data driven stochastic FP8 rounding matching Comfy Kitchen",
+        py::arg("input"), py::arg("rng"), py::arg("out_dtype"));
+
+    // Scaled Dot-Product Attention (ESIMD Flash Attention)
+    auto sdp = m.def_submodule("sdp", "Scaled dot-product attention kernels");
+    sdp.def("sdp", &omni_xpu::sdp::sdp,
+        "ESIMD Flash Attention for Intel XPU\n"
+        "Input: q/k/v [B, L, H, D] fp16/bf16 contiguous on XPU, D in {64, 128}\n"
+        "Constraints: B == 1\n"
+        "V is automatically per-head scaled to prevent fp16 accumulator overflow.\n"
+        "Returns: (output, has_nonfinite) where has_nonfinite is True if kernel\n"
+        "detected inf/nan (e.g. degenerate softmax), signaling SDPA fallback needed.",
+        py::arg("q"), py::arg("k"), py::arg("v"));
+
+    // INT8 Quantization and Linear (oneDNN s8 matmul)
+    auto int8 = m.def_submodule("int8", "INT8 quantization and linear kernels");
+    int8.def("mm_int8", &omni_xpu::int8_ops::mm_int8,
+        "INT8 matrix multiplication: C[M,N] = A[M,K] @ B[K,N] (s8×s8→s32)\n"
+        "Uses oneDNN DPAS-accelerated s8 matmul primitive.\n"
+        "Input: a [M, K] int8, b [K, N] int8\n"
+        "Output: [M, N] int32",
+        py::arg("a"), py::arg("b"));
+    int8.def("int8_linear", &omni_xpu::int8_ops::int8_linear,
+        "INT8 linear layer with dynamic activation quantization.\n"
+        "Fuses: rowwise quant → s8 GEMM → rescale → bias.\n"
+        "Input: x [M, K] fp16/bf16, weight [N, K] int8, weight_scale [N] or scalar f32\n"
+        "Output: [M, N] in out_dtype",
+        py::arg("x"), py::arg("weight"), py::arg("weight_scale"),
+        py::arg("bias") = py::none(), py::arg("out_dtype_code") = 2,
+        py::arg("convrot") = false, py::arg("convrot_groupsize") = 256);
+    int8.def("int8_linear_prequantized", &omni_xpu::int8_ops::int8_linear_prequantized,
+        "INT8 linear layer for prequantized rowwise activations.\n"
+        "Input: x_int8 [..., K], x_scale one value per flattened row, "
+        "weight [N, K] int8, weight_scale [N] or scalar f32\n"
+        "Output: [..., N] in out_dtype; activation quantization is not performed",
+        py::arg("x_int8"), py::arg("x_scale"), py::arg("weight"),
+        py::arg("weight_scale"), py::arg("bias") = py::none(),
+        py::arg("out_dtype_code") = 2);
+    int8.def(
+        "int8_linear_prequantized_out",
+        &omni_xpu::int8_ops::int8_linear_prequantized_out,
+        "INT8 linear into a caller-provided contiguous output tensor.\n"
+        "Used by bounded-memory row streaming without an extra output copy.",
+        py::arg("x_int8"), py::arg("x_scale"), py::arg("weight"),
+        py::arg("weight_scale"), py::arg("bias"),
+        py::arg("out_dtype_code"), py::arg("output"));
+#if defined(OMNI_XPU_ARCH_BMG)
+    int8.def(
+        "int8_linear_pair_prequantized",
+        &omni_xpu::int8_ops::int8_linear_pair_prequantized,
+        "BMG paired INT8 linears sharing one prequantized activation and "
+        "one oneDNN setup path.\n"
+        "Input: x_int8 [...,K], row scale, and two same-shaped [N,K] "
+        "weights with per-channel scales.\n"
+        "Output: two [...,N] floating tensors.",
+        py::arg("x_int8"), py::arg("x_scale"),
+        py::arg("weight1"), py::arg("weight_scale1"),
+        py::arg("weight2"), py::arg("weight_scale2"),
+        py::arg("out_dtype_code") = 1);
+#endif
+    int8.def("int8_linear_shared_input", &omni_xpu::int8_ops::int8_linear_shared_input,
+        "Two INT8 linear projections sharing one dynamic rowwise activation quantization.\n"
+        "Input: x [..., K] fp16/bf16 and two INT8 [N, K] weights\n"
+        "Output: two floating tensors with the original leading dimensions",
+        py::arg("x"), py::arg("weight1"), py::arg("weight_scale1"),
+        py::arg("weight2"), py::arg("weight_scale2"),
+        py::arg("bias1") = py::none(), py::arg("bias2") = py::none(),
+        py::arg("out_dtype_code") = 2);
+    int8.def("quantize_int8_tensorwise", &omni_xpu::int8_ops::quantize_int8_tensorwise,
+        "Quantize tensor to INT8 with single tensorwise scale.\n"
+        "Input: x (any shape), optional scale, stochastic_rounding seed\n"
+        "Output: (int8 tensor, float32 scale)",
+        py::arg("x"), py::arg("scale") = py::none(), py::arg("stochastic_rounding") = 0);
+    int8.def("quantize_int8_rowwise", &omni_xpu::int8_ops::quantize_int8_rowwise,
+        "Quantize tensor to INT8 with per-row scales.\n"
+        "Input: x [..., K]\n"
+        "Output: (int8 tensor, float32 scales [..., 1])",
+        py::arg("x"), py::arg("stochastic_rounding") = 0);
+    int8.def("quantize_int8_rowwise_fused", &omni_xpu::int8_ops::quantize_int8_rowwise_fused,
+        "Plain-SYCL fused per-row INT8 quantization (single kernel launch).\n"
+        "Fuses absmax + scale + divide + round + clamp + cast.\n"
+        "Input: x [..., K] bf16/f16\n"
+        "Output: (int8 tensor, float32 scales [..., 1])",
+        py::arg("x"));
+#if defined(OMNI_XPU_ARCH_BMG)
+    int8.def(
+        "quantize_int8_convrot_g16_bmg",
+        &omni_xpu::int8_ops::quantize_int8_convrot_g16_bmg,
+        "BMG DPAS-fused G16 ConvRot plus rowwise INT8 quantization for "
+        "validated Boogu FP16 K=3360 activation shapes.",
+        py::arg("input"));
+#endif
+    int8.def("fused_silu_mul", &omni_xpu::int8_ops::fused_silu_mul,
+        "Fused SiLU(x1) * x2 with one floating output and no SiLU temporary.\n"
+        "Input: x1/x2 identical bf16/f16 tensors\n"
+        "Output: floating tensor with the input shape and dtype",
+        py::arg("x1"), py::arg("x2"));
+    int8.def(
+        "fused_silu_mul_exact_bf16",
+        &omni_xpu::int8_ops::fused_silu_mul_exact_bf16,
+        "Exact-order BF16 SiLU(gate) * up for strided H3 activation halves",
+        py::arg("gate"), py::arg("up"));
+    int8.def("fused_silu_mul_quantize_rowwise", &omni_xpu::int8_ops::fused_silu_mul_quantize_rowwise,
+        "Fused SiLU(x1) * x2 followed by deterministic rowwise INT8 quantization.\n"
+        "Does not materialize the floating SwiGLU intermediate.\n"
+        "Input: x1/x2 [..., K] bf16/f16 with identical shape and dtype\n"
+        "Output: (int8 tensor, float32 scales [..., 1])",
+        py::arg("x1"), py::arg("x2"));
+    int8.def(
+        "fused_swiglu_quantize_rowwise",
+        &omni_xpu::int8_ops::fused_swiglu_quantize_rowwise,
+        "Fused SwiGLU on concatenated [gate | up] input followed by rowwise INT8 quantization",
+        py::arg("input"));
+    int8.def(
+        "fused_gelu_tanh_quantize_rowwise",
+        &omni_xpu::int8_ops::fused_gelu_tanh_quantize_rowwise,
+        "Fused tanh-approximate GELU followed by deterministic rowwise INT8 quantization",
+        py::arg("input"));
+    int8.def("rotate_convrot", &omni_xpu::int8_ops::rotate_convrot,
+        "Regular Hadamard rotation using a cached matrix multiplication on the last dimension",
+        py::arg("input"), py::arg("group_size") = 256);
+    int8.def("quantize_int8_convrot_weight", &omni_xpu::int8_ops::quantize_int8_convrot_weight,
+        "Native ConvRot weight rotation followed by row-wise INT8 quantization",
+        py::arg("weight"), py::arg("group_size") = 256,
+        py::arg("stochastic_rounding") = 0);
+    int8.def("dequantize_int8_convrot_weight", &omni_xpu::int8_ops::dequantize_int8_convrot_weight,
+        "Dequantize INT8 ConvRot weight and apply the inverse orthogonal rotation",
+        py::arg("q"), py::arg("scale"), py::arg("group_size") = 256);
+    int8.def("fused_scaleback", &omni_xpu::int8_ops::fused_scaleback,
+        "ESIMD fused scale-back: int32 GEMM result → output dtype in single pass.\n"
+        "Fuses: int32→f32 cast + scale multiply + dtype conversion + bias add.\n"
+        "Input: gemm_result [M,N] int32, x_scale [M], w_scale [N] or scalar, bias [N]\n"
+        "Output: [M,N] in specified dtype",
+        py::arg("gemm_result"), py::arg("x_scale"), py::arg("w_scale"),
+        py::arg("bias") = py::none(), py::arg("out_dtype_code") = 2);
+    int8.def("dequantize_int8_simple", &omni_xpu::int8_ops::dequantize_int8_simple,
+        "Dequantize INT8 tensor: result = q.float() * scale\n"
+        "Input: q (int8), scale (broadcastable)\n"
+        "Output: float32 tensor",
+        py::arg("q"), py::arg("scale"));
+    int8.def("dequantize_int8_simple_dtype", &omni_xpu::int8_ops::dequantize_int8_simple_dtype,
+        "Dequantize INT8 tensor with output dtype conversion.\n"
+        "dtype codes: 0=f32, 1=f16, 2=bf16\n"
+        "Input: q (int8), scale, output_dtype_code\n"
+        "Output: tensor in specified dtype",
+        py::arg("q"), py::arg("scale"), py::arg("output_dtype_code"));
+    int8.def("int8_cache_clear", &omni_xpu::int8_ops::int8_cache_clear,
+        "Clear INT8 oneDNN primitive cache");
+    int8.def("int8_cache_stats", &omni_xpu::int8_ops::int8_cache_stats,
+        "Return INT8 cache stats as (hits, misses, size)");
+}

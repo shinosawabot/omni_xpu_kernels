@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "repository initialization; not integrated release validation",
+  "components": {
+    "native": {
+      "repository": "https://github.com/shinosawabot/omni_xpu_kernels",
+      "source_repository": "https://github.com/intel/llm-scaler",
+      "source_revision": "38d9a3dbbfecd3a5293a8acd75efef54f9bb3719",
+      "source_path": "omni/omni_xpu_kernel"
+    },
+    "comfyui": {
+      "repository": "https://github.com/shinosawabot/ComfyUI_OmniXPU",
+      "source_repository": "https://github.com/intel/llm-scaler",
+      "source_revision": "38d9a3dbbfecd3a5293a8acd75efef54f9bb3719",
+      "source_path": "omni/ComfyUI-OmniXPU"
+    },
+    "kitchen": {
+      "repository": "https://github.com/shinosawabot/comfy-kitchen",
+      "source_repository": "https://github.com/xiangyuT/comfy-kitchen-xpu",
+      "source_revision": "950214add9c4a9709117d2c50f33d04ce030e018",
+      "upstream": "https://github.com/Comfy-Org/comfy-kitchen"
+    },
+    "aimdo": {
+      "repository": "https://github.com/shinosawabot/comfy-aimdo",
+      "source_repository": "https://github.com/xiangyuT/comfy-aimdo-xpu",
+      "source_revision": "8b8c2db0894c4f459fb8b918335dc6dd044183d7",
+      "upstream": "https://github.com/Comfy-Org/comfy-aimdo"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "scope": "source split and host tests; no GPU/workflow/release acceptance",
+  "runtime_source_hashes_match_upstream": true,
+  "tests_passed": 54,
+  "tests_skipped": 1,
+  "test_image": "sha256:0aeabe95ff3d2168e2f31dc4609db977bb549f7d70aac89542e8c24a6739b833",
+  "junit_sha256": "202b117c7d5698fbec3ee83ed334df729efcdbea874085634b123e6a6e86719a",
+  "suite": "tests/test_packaging.py tests/test_policy_manifest.py tests/test_platform_dispatch_source.py tests/test_sdp_benchmark_cases.py",
+  "notes": [
+    "Imported source whitespace is preserved for byte-identical provenance.",
+    "No GPU device was exposed to the validation container."
+  ]
+}
