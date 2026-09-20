@@ -15,7 +15,7 @@ from pathlib import Path
 __image_version__ = "0.2.0-b2"
 __base_version__ = "0.2.0b2"
 __supported_torch_minors__ = ("2.10", "2.11", "2.12", "2.13")
-__supported_xpu_targets__ = ("bmg", "ptl-h")
+__supported_xpu_targets__ = ("bmg", "ptl-h", "dg2")
 
 
 def get_public_torch_version(torch_version):
@@ -67,7 +67,7 @@ def get_xpu_target_tag(xpu_target):
 
 def get_xpu_target_from_package_version(package_version):
     """Recover the AOT target from a Torch- and GPU-tagged wheel version."""
-    match = re.search(r"\+torch\d+\.(bmg|ptlh)$", str(package_version), re.IGNORECASE)
+    match = re.search(r"\+torch\d+\.(bmg|ptlh|dg2)$", str(package_version), re.IGNORECASE)
     if not match:
         raise RuntimeError(
             "omni_xpu_kernel wheel version has no supported GPU target tag: "

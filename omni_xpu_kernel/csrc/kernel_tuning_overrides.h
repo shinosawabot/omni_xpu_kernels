@@ -4,10 +4,13 @@
 // generated from the maintained policy manifest. These values are shared by
 // an architecture wheel; SKU-local defaults belong in Bmg*KernelPolicy.
 
-#if !defined(OMNI_XPU_ARCH_PTL_H) && !defined(OMNI_XPU_ARCH_BMG)
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#if !defined(OMNI_XPU_ARCH_PTL_H) && !defined(OMNI_XPU_ARCH_BMG) && \
+    !defined(OMNI_XPU_ARCH_DG2)
+#error "Define OMNI_XPU_ARCH_PTL_H, OMNI_XPU_ARCH_BMG, or OMNI_XPU_ARCH_DG2"
 #endif
-#if defined(OMNI_XPU_ARCH_PTL_H) && defined(OMNI_XPU_ARCH_BMG)
+#if (defined(OMNI_XPU_ARCH_PTL_H) && defined(OMNI_XPU_ARCH_BMG)) || \
+    (defined(OMNI_XPU_ARCH_PTL_H) && defined(OMNI_XPU_ARCH_DG2)) || \
+    (defined(OMNI_XPU_ARCH_BMG) && defined(OMNI_XPU_ARCH_DG2))
 #error "Define exactly one XPU architecture"
 #endif
 

@@ -81,8 +81,10 @@ PACKAGE_VERSION = VERSION_NAMESPACE["get_package_version"](
 XPU_ARCH_MACROS = {
     "bmg": "OMNI_XPU_ARCH_BMG",
     "ptl-h": "OMNI_XPU_ARCH_PTL_H",
+    "dg2": "OMNI_XPU_ARCH_DG2",
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
+CUTE_UNSUPPORTED_TARGETS = frozenset(("dg2",))
 KERNEL_TUNING_DEFINE_NAMES = POLICY_CODEGEN_NAMESPACE[
     "EXPECTED_TUNING_PARAMETERS"
 ]
@@ -138,6 +140,11 @@ CUTE_AOT_TARGETS = {
 def get_cute_aot_target(xpu_target):
     """Return the OS-independent compiler target list for a CUTE sidecar."""
     target = str(xpu_target).strip().lower()
+    if target in CUTE_UNSUPPORTED_TARGETS:
+        raise RuntimeError(
+            f"CUTE AOT is not supported for OMNI_XPU_DEVICE={target}; "
+            "build the DG2 core with OMNI_XPU_REQUIRE_CUTE=0"
+        )
     try:
         targets = CUTE_AOT_TARGETS[target]
     except KeyError as error:
@@ -1137,7 +1144,11 @@ _ext_modules = [
     ICPXExtension("omni_xpu_kernel.lgrf_uni.lgrf_sdp", sourcedir="."),
 ]
 _cutlass_sycl_root = os.environ.get("CUTLASS_SYCL_ROOT", "")
-_cutlass_sycl_default = "0" if IS_WINDOWS else "1"
+_cutlass_sycl_default = (
+    "0"
+    if IS_WINDOWS or BUILD_XPU_TARGET in CUTE_UNSUPPORTED_TARGETS
+    else "1"
+)
 _cutlass_sycl_required = (
     os.environ.get("OMNI_XPU_REQUIRE_CUTE", _cutlass_sycl_default) != "0"
 )
@@ -1145,6 +1156,11 @@ _cutlass_sycl_dirs = ("include", "tools/util/include", "examples/common", "appli
 _cutlass_sycl_available = bool(_cutlass_sycl_root) and all(
     os.path.isdir(os.path.join(_cutlass_sycl_root, path)) for path in _cutlass_sycl_dirs
 )
+if _cutlass_sycl_required and BUILD_XPU_TARGET in CUTE_UNSUPPORTED_TARGETS:
+    raise RuntimeError(
+        f"CUTE is not supported for OMNI_XPU_DEVICE={BUILD_XPU_TARGET}; "
+        "unset OMNI_XPU_REQUIRE_CUTE or set it to 0 for a core-only build"
+    )
 if _cutlass_sycl_required and not _cutlass_sycl_available:
     requirement = (
         "CUTE was explicitly enabled on Windows"

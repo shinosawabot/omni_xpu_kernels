@@ -18,7 +18,7 @@ PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 IMAGE_VERSION = "0.2.0-b2"
 BASE_VERSION = "0.2.0b2"
 SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12", "2.13")
-SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h")
+SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2")
 VERSION_NAMESPACE = run_path(str(VERSION_FILE))
 TORCH_VERSION = VERSION_NAMESPACE["get_installed_torch_version"]()
 TORCH_VERSION_TAG = VERSION_NAMESPACE["get_torch_tag"](TORCH_VERSION)
@@ -155,7 +155,7 @@ def test_windows_compile_env_adds_aot_companion_tools(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     ("target", "target_tag"),
-    [("bmg", "bmg"), ("ptl-h", "ptlh")],
+    [("bmg", "bmg"), ("ptl-h", "ptlh"), ("dg2", "dg2")],
 )
 def test_gpu_targets_select_distinct_wheel_tags(target, target_tag):
     package_version = VERSION_NAMESPACE["get_package_version"]("2.11.0+xpu", target)
@@ -265,6 +265,55 @@ def test_setup_metadata_tags_ptl_h_target():
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == f"{BASE_VERSION}+{TORCH_VERSION_TAG}.ptlh"
+
+
+def test_setup_metadata_tags_dg2_core_target():
+    env = setup_metadata_env(require_cute=None)
+    env["OMNI_XPU_DEVICE"] = "dg2"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py", "--version"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == f"{BASE_VERSION}+{TORCH_VERSION_TAG}.dg2"
+
+
+def test_dg2_defaults_to_core_only_when_cute_is_unset():
+    env = setup_metadata_env(require_cute=None)
+    env["OMNI_XPU_DEVICE"] = "dg2"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py", "--name"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_dg2_rejects_explicit_cute_build():
+    env = setup_metadata_env(require_cute="1")
+    env["OMNI_XPU_DEVICE"] = "dg2"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py", "--name"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "CUTE is not supported for OMNI_XPU_DEVICE=dg2" in (
+        result.stdout + result.stderr
+    )
 
 
 def test_build_system_does_not_force_a_torch_environment():
@@ -679,6 +728,8 @@ def test_cute_aot_targets_cover_concrete_bmg_skus_once(monkeypatch):
     get_target = namespace["get_cute_aot_target"]
     assert get_target("bmg") == "bmg-g21,bmg-g31"
     assert get_target("ptl-h") == "ptl-h"
+    with pytest.raises(RuntimeError, match="CUTE AOT is not supported"):
+        get_target("dg2")
     with pytest.raises(RuntimeError, match="Unsupported CUTE AOT architecture"):
         get_target("pvc")
 
@@ -849,9 +900,11 @@ def test_linux_core_compile_command_is_aot_for_every_supported_target(
 
     build_extension = namespace["ICPXBuildExt"].build_extension
     build_globals = build_extension.__globals__
-    target_macro = (
-        "OMNI_XPU_ARCH_PTL_H" if target == "ptl-h" else "OMNI_XPU_ARCH_BMG"
-    )
+    target_macro = {
+        "bmg": "OMNI_XPU_ARCH_BMG",
+        "ptl-h": "OMNI_XPU_ARCH_PTL_H",
+        "dg2": "OMNI_XPU_ARCH_DG2",
+    }[target]
     monkeypatch.setitem(build_globals, "BUILD_XPU_TARGET", target)
     monkeypatch.setitem(build_globals, "XPU_ARCH_MACRO", target_macro)
     monkeypatch.setitem(build_globals, "get_icpx_path", lambda: "/fake/icpx")
