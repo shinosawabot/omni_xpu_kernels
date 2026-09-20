@@ -298,6 +298,28 @@ def test_dg2_defaults_to_core_only_when_cute_is_unset():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_dg2_extension_metadata_excludes_unsupported_sidecars(monkeypatch):
+    captured = {}
+    monkeypatch.chdir(PROJECT_ROOT)
+    monkeypatch.setenv("OMNI_XPU_DEVICE", "dg2")
+    monkeypatch.setenv("OMNI_XPU_REQUIRE_CUTE", "0")
+    monkeypatch.delenv("CUTLASS_SYCL_ROOT", raising=False)
+    monkeypatch.setattr(
+        setuptools, "setup", lambda **kwargs: captured.update(kwargs)
+    )
+
+    namespace = run_path(
+        str(PROJECT_ROOT / "setup.py"),
+        run_name="__dg2_extension_metadata_test__",
+    )
+
+    extensions = {extension.name for extension in captured["ext_modules"]}
+    assert extensions == {"omni_xpu_kernel._C"}
+    assert namespace["LGRF_UNSUPPORTED_TARGETS"] == frozenset(("dg2",))
+    with pytest.raises(RuntimeError, match="LGRF AOT is not supported"):
+        namespace["get_lgrf_aot_backend_options"]("dg2")
+
+
 def test_dg2_rejects_explicit_cute_build():
     env = setup_metadata_env(require_cute="1")
     env["OMNI_XPU_DEVICE"] = "dg2"

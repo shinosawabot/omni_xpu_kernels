@@ -85,12 +85,10 @@ XPU_ARCH_MACROS = {
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
 CUTE_UNSUPPORTED_TARGETS = frozenset(("dg2",))
+LGRF_UNSUPPORTED_TARGETS = frozenset(("dg2",))
 LGRF_AOT_BACKEND_OPTIONS = {
     "bmg": "-device bmg -options -doubleGRF",
     "ptl-h": "-device ptl-h -options -doubleGRF",
-    # DG2's ocloc path rejects the double-GRF mode used by BMG/PTL. Keep the
-    # LGRF sidecar on the compiler's default GRF mode for the A770 target.
-    "dg2": "-device dg2",
 }
 KERNEL_TUNING_DEFINE_NAMES = POLICY_CODEGEN_NAMESPACE[
     "EXPECTED_TUNING_PARAMETERS"
@@ -166,6 +164,11 @@ def get_cute_aot_target(xpu_target):
 def get_lgrf_aot_backend_options(xpu_target):
     """Return target-specific backend options for the ESIMD LGRF sidecar."""
     target = str(xpu_target).strip().lower()
+    if target in LGRF_UNSUPPORTED_TARGETS:
+        raise RuntimeError(
+            f"LGRF AOT is not supported for OMNI_XPU_DEVICE={target}; "
+            "build the DG2 core without the LGRF sidecar"
+        )
     try:
         return LGRF_AOT_BACKEND_OPTIONS[target]
     except KeyError as error:
@@ -1157,12 +1160,17 @@ def get_long_description():
     return ""
 
 
-# Extension list. CUTE is required by default on Linux. Windows remains a
-# core-only build unless OMNI_XPU_REQUIRE_CUTE=1 is set explicitly.
+# Extension list. DG2 is a core-only build because neither CUTE nor the LGRF
+# sidecar has a working compiler path for that target. CUTE is required by
+# default on Linux for the BMG/PTL-H targets. Windows remains a core-only
+# build unless OMNI_XPU_REQUIRE_CUTE=1 is set explicitly.
 _ext_modules = [
     ICPXExtension("omni_xpu_kernel._C", sourcedir="."),
-    ICPXExtension("omni_xpu_kernel.lgrf_uni.lgrf_sdp", sourcedir="."),
 ]
+if BUILD_XPU_TARGET not in LGRF_UNSUPPORTED_TARGETS:
+    _ext_modules.append(
+        ICPXExtension("omni_xpu_kernel.lgrf_uni.lgrf_sdp", sourcedir=".")
+    )
 _cutlass_sycl_root = os.environ.get("CUTLASS_SYCL_ROOT", "")
 _cutlass_sycl_default = (
     "0"

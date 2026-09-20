@@ -2,7 +2,8 @@
 // SDP (Scaled Dot-Product Attention) - ESIMD Flash Attention via lgrf sidecar
 // ============================================================================
 // Loads the pre-compiled ESIMD Flash Attention kernel from a sidecar shared
-// library (lgrf_sdp.so / lgrf_sdp.pyd) built with doubleGRF for Xe2 ISA.
+// library (lgrf_sdp.so / lgrf_sdp.pyd) built with doubleGRF for supported Xe2
+// targets. DG2 uses the Python wrapper's native PyTorch/XPU SDPA fallback.
 //
 // The sidecar exports C functions:
 //   sdp_fp16       — FP16 optimized Flash Attention (HD=128)
@@ -221,6 +222,13 @@ static void check_sdp_tensor(const torch::Tensor& t, const char* name) {
 }
 
 torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
+#if defined(OMNI_XPU_ARCH_DG2)
+    TORCH_CHECK(
+        false,
+        "omni_xpu_kernel.sdp native ESIMD sidecar is unavailable for DG2; "
+        "use the Python sdp wrapper for the PyTorch/XPU SDPA fallback"
+    );
+#endif
     check_sdp_tensor(q, "q");
     check_sdp_tensor(k, "k");
     check_sdp_tensor(v, "v");
