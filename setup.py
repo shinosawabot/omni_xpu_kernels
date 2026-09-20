@@ -85,6 +85,13 @@ XPU_ARCH_MACROS = {
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
 CUTE_UNSUPPORTED_TARGETS = frozenset(("dg2",))
+LGRF_AOT_BACKEND_OPTIONS = {
+    "bmg": "-device bmg -options -doubleGRF",
+    "ptl-h": "-device ptl-h -options -doubleGRF",
+    # DG2's ocloc path rejects the double-GRF mode used by BMG/PTL. Keep the
+    # LGRF sidecar on the compiler's default GRF mode for the A770 target.
+    "dg2": "-device dg2",
+}
 KERNEL_TUNING_DEFINE_NAMES = POLICY_CODEGEN_NAMESPACE[
     "EXPECTED_TUNING_PARAMETERS"
 ]
@@ -154,6 +161,19 @@ def get_cute_aot_target(xpu_target):
             f"supported architectures: {supported}"
         ) from error
     return ",".join(targets)
+
+
+def get_lgrf_aot_backend_options(xpu_target):
+    """Return target-specific backend options for the ESIMD LGRF sidecar."""
+    target = str(xpu_target).strip().lower()
+    try:
+        return LGRF_AOT_BACKEND_OPTIONS[target]
+    except KeyError as error:
+        supported = ", ".join(LGRF_AOT_BACKEND_OPTIONS)
+        raise RuntimeError(
+            f"Unsupported LGRF AOT architecture {xpu_target!r}; "
+            f"supported architectures: {supported}"
+        ) from error
 
 BMG_CUTE_REMAINDER_MASK_ORIGINAL = """\
           FragSRow k_rem_mask;
@@ -801,7 +821,7 @@ class ICPXBuildExt(build_ext):
             if is_lgrf:
                 cmd += [
                     "-fsycl-targets=spir64_gen",
-                    "-Xs", f"-device {BUILD_XPU_TARGET} -options -doubleGRF",
+                    "-Xs", get_lgrf_aot_backend_options(BUILD_XPU_TARGET),
                     "/O2", "/DNDEBUG",
                     "/EHsc",
                     "/std:c++17",
@@ -926,7 +946,7 @@ class ICPXBuildExt(build_ext):
             if is_lgrf:
                 cmd += [
                     "-fsycl-targets=spir64_gen",
-                    "-Xs", f"-device {BUILD_XPU_TARGET} -options -doubleGRF",
+                    "-Xs", get_lgrf_aot_backend_options(BUILD_XPU_TARGET),
                     "-O3", "-DNDEBUG",
                     "-DBUILD_ESIMD_KERNEL_LIB",
                     f"-D{XPU_ARCH_MACRO}=1",
