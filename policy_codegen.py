@@ -20,11 +20,12 @@ GENERATED_ROOT = PROJECT_ROOT / "omni_xpu_kernel" / "csrc" / "generated"
 TUNING_HEADER_PATH = GENERATED_ROOT / "kernel_tuning_defaults_generated.h"
 BMG_POLICY_HEADER_PATH = GENERATED_ROOT / "bmg_kernel_policy_generated.h"
 
-EXPECTED_BUILD_TARGETS = ("bmg", "ptl-h", "dg2")
+EXPECTED_BUILD_TARGETS = ("bmg", "ptl-h", "dg2", "lnl")
 BUILD_TARGET_MACROS = {
     "bmg": "OMNI_XPU_ARCH_BMG",
     "ptl-h": "OMNI_XPU_ARCH_PTL_H",
     "dg2": "OMNI_XPU_ARCH_DG2",
+    "lnl": "OMNI_XPU_ARCH_LNL",
 }
 EXPECTED_RUNTIME_POLICIES = ("b580", "b60", "b70", "generic-bmg")
 EXPECTED_SKUS = ("b580", "b50", "b60", "b70")

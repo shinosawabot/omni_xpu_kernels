@@ -174,7 +174,7 @@ struct B580H3VaeD64S1797CandidatePolicy : B580KernelPolicy {
     static constexpr int h3_vae_d64_s1797_kv_tile = 64;
 };
 
-inline constexpr const char* policy_manifest_sha256 = "add92f848079daff996c155f66d5faf314ef57be9efaad324c0f17dd6400ea2b";
+inline constexpr const char* policy_manifest_sha256 = "448cde4925175f02c3876a9aeabe3ba37c213baa4e53ea2137fb8ba73142e85e";
 
 inline constexpr const char* kernel_policy_id(
         BmgKernelProfile profile) {

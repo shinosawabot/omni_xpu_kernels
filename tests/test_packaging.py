@@ -18,7 +18,7 @@ PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 IMAGE_VERSION = "0.2.0-b2"
 BASE_VERSION = "0.2.0b2"
 SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12", "2.13")
-SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2")
+SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2", "lnl")
 VERSION_NAMESPACE = run_path(str(VERSION_FILE))
 TORCH_VERSION = VERSION_NAMESPACE["get_installed_torch_version"]()
 TORCH_VERSION_TAG = VERSION_NAMESPACE["get_torch_tag"](TORCH_VERSION)
@@ -155,7 +155,7 @@ def test_windows_compile_env_adds_aot_companion_tools(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     ("target", "target_tag"),
-    [("bmg", "bmg"), ("ptl-h", "ptlh"), ("dg2", "dg2")],
+    [("bmg", "bmg"), ("ptl-h", "ptlh"), ("dg2", "dg2"), ("lnl", "lnl")],
 )
 def test_gpu_targets_select_distinct_wheel_tags(target, target_tag):
     package_version = VERSION_NAMESPACE["get_package_version"]("2.11.0+xpu", target)
@@ -415,9 +415,12 @@ def test_extension_metadata_tracks_native_sources(monkeypatch, tmp_path):
     assert "kernel_tuning_defaults_generated.h" in main_dependencies
     assert "bmg_kernel_policy_generated.h" in main_dependencies
     assert setup_namespace["BUILD_XPU_TARGET"] == XPU_TARGET
-    assert setup_namespace["XPU_ARCH_MACRO"] == (
-        "OMNI_XPU_ARCH_PTL_H" if XPU_TARGET == "ptl-h" else "OMNI_XPU_ARCH_BMG"
-    )
+    assert setup_namespace["XPU_ARCH_MACRO"] == {
+        "bmg": "OMNI_XPU_ARCH_BMG",
+        "ptl-h": "OMNI_XPU_ARCH_PTL_H",
+        "dg2": "OMNI_XPU_ARCH_DG2",
+        "lnl": "OMNI_XPU_ARCH_LNL",
+    }[XPU_TARGET]
     assert all(
         not package.startswith(("tests", "scripts", "benchmarks"))
         for package in captured["packages"]
@@ -926,6 +929,7 @@ def test_linux_core_compile_command_is_aot_for_every_supported_target(
         "bmg": "OMNI_XPU_ARCH_BMG",
         "ptl-h": "OMNI_XPU_ARCH_PTL_H",
         "dg2": "OMNI_XPU_ARCH_DG2",
+        "lnl": "OMNI_XPU_ARCH_LNL",
     }[target]
     monkeypatch.setitem(build_globals, "BUILD_XPU_TARGET", target)
     monkeypatch.setitem(build_globals, "XPU_ARCH_MACRO", target_macro)

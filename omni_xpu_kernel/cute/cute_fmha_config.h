@@ -5,6 +5,7 @@ namespace cute_fmha_config {
 
 struct BMGTag {};
 struct PTLHTag {};
+struct LNLTag {};
 
 template <
     typename ArchTag,
@@ -33,15 +34,18 @@ using ConfigBMG = Config<BMGTag, 256, 32, 32, 32, 128, 16, 2, 256>;
 // Internal PTL-H representative-workload validation retained this policy.
 // Keep a separate type so later PTL-H tuning cannot silently alter BMG.
 using ConfigPTLH = Config<PTLHTag, 256, 32, 32, 32, 128, 16, 2, 256>;
+using ConfigLNL = Config<LNLTag, 256, 32, 32, 32, 128, 16, 2, 256>;
 
-#if defined(OMNI_XPU_ARCH_BMG) && defined(OMNI_XPU_ARCH_PTL_H)
+#if (defined(OMNI_XPU_ARCH_BMG) + defined(OMNI_XPU_ARCH_PTL_H) + defined(OMNI_XPU_ARCH_LNL)) != 1
 #error "Select only one omni_xpu_kernel GPU architecture"
 #elif defined(OMNI_XPU_ARCH_BMG)
 using ActiveConfig = ConfigBMG;
 #elif defined(OMNI_XPU_ARCH_PTL_H)
 using ActiveConfig = ConfigPTLH;
+#elif defined(OMNI_XPU_ARCH_LNL)
+using ActiveConfig = ConfigLNL;
 #else
-#error "Define OMNI_XPU_ARCH_BMG or OMNI_XPU_ARCH_PTL_H"
+#error "Define OMNI_XPU_ARCH_BMG, OMNI_XPU_ARCH_PTL_H, or OMNI_XPU_ARCH_LNL"
 #endif
 
 }  // namespace cute_fmha_config

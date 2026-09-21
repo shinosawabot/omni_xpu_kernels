@@ -181,7 +181,7 @@ def test_tuning_override_surface_is_centralized_and_exported():
         assert '#include "kernel_tuning_overrides.h"' in source
 
 
-@pytest.mark.parametrize("target", ["ptl-h", "bmg", "dg2"])
+@pytest.mark.parametrize("target", ["ptl-h", "bmg", "dg2", "lnl"])
 def test_tuning_override_defaults_compile_for_each_target(tmp_path, target):
     compiler = shutil.which("c++") or shutil.which("g++")
     if compiler is None:
@@ -193,6 +193,7 @@ def test_tuning_override_defaults_compile_for_each_target(tmp_path, target):
         "bmg": "OMNI_XPU_ARCH_BMG",
         "ptl-h": "OMNI_XPU_ARCH_PTL_H",
         "dg2": "OMNI_XPU_ARCH_DG2",
+        "lnl": "OMNI_XPU_ARCH_LNL",
     }[target]
     assertions = "\n".join(
         f"static_assert({name} == {value});"
