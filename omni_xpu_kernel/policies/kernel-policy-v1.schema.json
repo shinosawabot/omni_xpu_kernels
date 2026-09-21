@@ -19,10 +19,12 @@
     "build_tuning_profiles": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bmg", "ptl-h"],
+      "required": ["bmg", "ptl-h", "dg2", "lnl"],
       "properties": {
         "bmg": {"$ref": "#/$defs/buildProfile"},
-        "ptl-h": {"$ref": "#/$defs/buildProfile"}
+        "ptl-h": {"$ref": "#/$defs/buildProfile"},
+        "dg2": {"$ref": "#/$defs/buildProfile"},
+        "lnl": {"$ref": "#/$defs/buildProfile"}
       }
     },
     "runtime_policies": {

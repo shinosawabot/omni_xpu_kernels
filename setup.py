@@ -82,6 +82,7 @@ XPU_ARCH_MACROS = {
     "bmg": "OMNI_XPU_ARCH_BMG",
     "ptl-h": "OMNI_XPU_ARCH_PTL_H",
     "dg2": "OMNI_XPU_ARCH_DG2",
+    "lnl": "OMNI_XPU_ARCH_LNL",
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
 CUTE_UNSUPPORTED_TARGETS = frozenset(("dg2",))
@@ -89,6 +90,7 @@ LGRF_UNSUPPORTED_TARGETS = frozenset(("dg2",))
 LGRF_AOT_BACKEND_OPTIONS = {
     "bmg": "-device bmg -options -doubleGRF",
     "ptl-h": "-device ptl-h -options -doubleGRF",
+    "lnl": "-device lnl -options -doubleGRF",
 }
 KERNEL_TUNING_DEFINE_NAMES = POLICY_CODEGEN_NAMESPACE[
     "EXPECTED_TUNING_PARAMETERS"
@@ -139,6 +141,7 @@ CUTE_AOT_TARGETS = {
     # target list de-duplicates the shared G21 image used by B580 and B60.
     "bmg": tuple(dict.fromkeys(BMG_CUTE_SKU_AOT_TARGETS.values())),
     "ptl-h": ("ptl-h",),
+    "lnl": ("lnl",),
 }
 
 
@@ -847,10 +850,10 @@ class ICPXBuildExt(build_ext):
                         "include/, tools/util/include/, examples/common/, "
                         "applications/. Got: " + repr(cutlass)
                     )
-                if BUILD_XPU_TARGET != "bmg":
+                if BUILD_XPU_TARGET not in ("bmg", "lnl"):
                     raise RuntimeError(
                         "Windows CUTE is currently available only for "
-                        "OMNI_XPU_DEVICE=bmg"
+                        "OMNI_XPU_DEVICE=bmg or lnl"
                     )
                 cute_aot_target = get_cute_aot_target(BUILD_XPU_TARGET)
                 print(f"CUTE AOT target: {cute_aot_target}")

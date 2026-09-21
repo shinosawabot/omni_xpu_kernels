@@ -489,7 +489,7 @@ def _can_fuse_gelu_tanh_quantize(
     x: torch.Tensor,
     native,
 ) -> bool:
-    """Use only the BMG contracts where fused GELU beats materialization."""
+    """Use target-specific BMG/LNL small-row fused GELU contracts."""
     if (
         x.dtype not in (torch.float16, torch.bfloat16)
         or x.ndim < 2
@@ -502,7 +502,7 @@ def _can_fuse_gelu_tanh_quantize(
     try:
         from .. import __xpu_target__, core_aot_target
 
-        if __xpu_target__ != "bmg" or core_aot_target() != "bmg":
+        if __xpu_target__ not in ("bmg", "lnl") or core_aot_target() != __xpu_target__:
             return False
     except (ImportError, RuntimeError):
         return False
