@@ -1,6 +1,6 @@
 # omni_xpu_kernels
 
-Independent private source home for Omni Intel XPU native kernels and PyTorch
+Independent public source home for Omni Intel XPU native kernels and PyTorch
 bindings. The Python distribution and import remain **`omni_xpu_kernel`**.
 
 The initial source snapshot comes from `intel/llm-scaler` at
