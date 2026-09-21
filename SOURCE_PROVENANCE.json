@@ -6,12 +6,8 @@
   "import_kind": "standalone source snapshot; upstream Git history remains at source_repository",
   "architecture_references": [
     {
-      "repository": "https://github.com/xiangyuT/owl-xpu",
+      "repository": "https://github.com/shinosawabot/owl-xpu",
       "revision": "7ecf3402d87381aa7f8fb608840c1c6facd3695d"
-    },
-    {
-      "repository": "https://github.com/xiangyuT/omni-xpu-kernel-tuning",
-      "revision": "c1a22c362e162b69dc3e3a628a02a6494bed9a15"
     }
   ],
   "runtime_files_changed": false,

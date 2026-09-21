@@ -16,13 +16,13 @@
     },
     "kitchen": {
       "repository": "https://github.com/shinosawabot/comfy-kitchen",
-      "source_repository": "https://github.com/xiangyuT/comfy-kitchen-xpu",
+      "source_repository": "https://github.com/shinosawabot/comfy-kitchen",
       "source_revision": "950214add9c4a9709117d2c50f33d04ce030e018",
       "upstream": "https://github.com/Comfy-Org/comfy-kitchen"
     },
     "aimdo": {
       "repository": "https://github.com/shinosawabot/comfy-aimdo",
-      "source_repository": "https://github.com/xiangyuT/comfy-aimdo-xpu",
+      "source_repository": "https://github.com/shinosawabot/comfy-aimdo",
       "source_revision": "8b8c2db0894c4f459fb8b918335dc6dd044183d7",
       "upstream": "https://github.com/Comfy-Org/comfy-aimdo"
     }

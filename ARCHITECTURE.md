@@ -1,7 +1,8 @@
 # Component architecture
 
-This workspace follows the ownership boundaries in `xiangyuT/owl-xpu` and
-`xiangyuT/omni-xpu-kernel-tuning`, expressed as four independent private repositories.
+This workspace follows the ownership boundaries in `shinosawabot/owl-xpu` and
+separately maintained benchmark evidence, expressed as four independent public
+repositories.
 
 | Repository | Responsibility |
 | --- | --- |
@@ -29,8 +30,8 @@ part of repository initialization. Each target requires its own build and
 correctness evidence; the four imported snapshots are not a newly validated
 end-to-end component combination.
 
-The tuning repository remains the owner of benchmark contracts and measured
-evidence. Its target profiles and same-run ceiling rules are not copied into
+Benchmark and tuning sources remain the owner of benchmark contracts and measured
+evidence. Their target profiles and same-run ceiling rules are not copied into
 runtime policy or replaced by nominal hardware specifications.
 
 See `SOURCE_PROVENANCE.json` and `component-sources.json` for exact source identities.
